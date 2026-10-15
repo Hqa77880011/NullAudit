@@ -1,0 +1,22 @@
+{
+  "seed": 17,
+  "device": "cpu",
+  "epochs": 100,
+  "patience": 15,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "input_dim": 3072,
+  "hidden": 64,
+  "classes": 100,
+  "epochs_per_task": 5,
+  "maximum_rank": 16,
+  "fixed_rank": 8,
+  "memory_bytes": 67108864,
+  "residual_threshold": 1,
+  "minimum_retention": 0.2,
+  "jacobian_examples": 16,
+  "jacobian_outputs": 2,
+  "ewc_weight": 100
+}
+
