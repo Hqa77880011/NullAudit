@@ -19,7 +19,7 @@ python -m pip install -e .
 The CIFAR adapter downloads [CIFAR-100](https://www.cs.toronto.edu/~kriz/cifar.html), reserves 10% of training examples for validation, preserves the test set and records sequential class-task IDs.
 
 ```bash
-python -m nullaudit.cifar --output data/raw.npz --seed 17
+python -m nullaudit.cifar --root data/cifar --download --output data/raw.npz --seed 17
 python -m nullaudit prepare --source data/raw.npz --output data/prepared --seed 17
 ```
 
@@ -76,7 +76,54 @@ Select a sketch filename and ranks that actually exist in the run. `old-data` an
 
 Accuracy metrics are fractions. Forgetting is maximum accuracy after learning each old task minus final accuracy, averaged over old tasks. New-task accuracy averages the diagonal of the task accuracy matrix. ECE uses integer-indexed bins so confidences at floating-point boundaries are counted exactly once. The CIFAR adapter preserves released test images; no test labels tune ranks or gates.
 
-The exact Split CIFAR backbone and prior sketched-Jacobian replication, OGD/GPM/LwF/PackNet/prompt methods/replay/exact-Jacobian oracle, equal-byte frontier, multi-seed study and full residual-to-realized-drift calibration are not implemented or claimed by the included controls.
+The supplied manuscript does not release its exact Split-CIFAR backbone or original experimental artifacts. The common-backbone comparisons use this declared MLP, class order, cross-entropy, batch schedule and seed. The nearest cited prior, Heckel (2022), uses **regularization with a sketched Jacobian (RSJ)**, rather than hard projection. `prior_rsj` implements Gaussian `S J` rows and `lambda/2 * ||K(theta-anchor)||^2`, recentering the accumulated quadratic at the latest task solution. Its Jacobian example/output sampling matches NullAudit. It is separate from the existing `fixed_rank` hard-projection control.
+
+## Source-defined comparison methods
+
+These are independent implementations after checking the original methods; upstream code and licenses have not been vendored or relicensed.
+
+| Method | Mechanism | Primary source / official implementation |
+|---|---|---|
+| `prior_rsj` | Gaussian task-Jacobian sketch, recentered quadratic regularization | [Heckel 2022, Sec.3](https://proceedings.mlr.press/v151/heckel22a/heckel22a.pdf) |
+| `ogd` | Ground-truth-logit gradients, incremental Gram-Schmidt and projection | [OGD-GTL](https://proceedings.mlr.press/v108/farajtabar20a/farajtabar20a.pdf) |
+| `gpm` | Activation residual SVD and layer-input gradient projection | [official GPM](https://github.com/sahagobinda/GPM/blob/main/main_pmnist.py) |
+| `lwf` | Frozen previous network, old-class temperature distillation on current images | [official LwF](https://github.com/lizhitwo/LearningWithoutForgetting) |
+| `packnet` | Magnitude pruning, persistent ownership, old-weight freezing and mask refitting | [official PackNet](https://github.com/arunmallya/packnet/blob/master/src/prune.py) |
+| `replay` | Explicit bounded old-example buffer mixed into current batches | Declared uniform retained-plus-current replay control |
+| `exact_jacobian` | Every sampled-example logit gradient, unbounded basis | Manuscript diagnostic oracle |
+
+GPM uses this shared MLP's layer activations and freezes biases after task one. PackNet uses per-parameter ownership, default prune fraction 0.5 and one refit step; its requested-task mask makes this a **task-aware** comparison. Replay uniformly resamples retained-plus-current records rather than claiming exact reservoir sampling. LwF explicitly counts its complete frozen teacher and class metadata as nonzero protected state. The exact-Jacobian oracle bypasses the state cap and is not a fixed-budget competitor. Full multi-seed CIFAR performance and the manuscript's numerical results remain unverified.
+
+## Equal-byte frontier and measured memory
+
+```bash
+python -m nullaudit.frontier --config configs/default.json --data data/prepared --methods nullaudit prior_rsj ogd gpm lwf packnet replay --budgets 16777216 33554432 67108864 --output runs/equal-byte
+```
+
+`frontier.csv/json/png` use identical **byte caps** and plot actual retained bytes; unused capacity is not padded. Infeasible configurations remain marked `infeasible`. New controls' retained payload counts tensors, deduplicated aliases and serialized primitive metadata. Python object/allocator overhead, the common model, provider arrays and optimizer are outside this payload definition. `process_peak_rss_bytes_sampled` is measured separately every 2 ms during training and includes those process allocations; it may miss shorter spikes. The existing eight-buffer sketch allowance remains analytic, not an empirical RSS cap.
+
+## Prompt and vision-language paths
+
+Install `python -m pip install -e ".[prompts]"`. The independent path uses an actual locally configured Hugging Face CLIP vision/text backbone, class-ordered tokenizer IDs (`C x sequence_length` NPY) and optionally a local pretrained CLIP state_dict. It automatically downloads no weights.
+
+```bash
+python -m nullaudit.prompts --config data/clip-config.json --text-tokens data/class-tokens.npy --backbone-state data/clip-state.pt --data data/prepared/train.npz --method pgp --epochs 5 --output runs/pgp
+python -m nullaudit.prompts --config data/clip-config.json --text-tokens data/class-tokens.npy --backbone-state data/clip-state.pt --data data/prepared/train.npz --method vpt_ns --epochs 5 --output runs/vpt-ns
+python -m nullaudit.prompts --config data/clip-config.json --text-tokens data/class-tokens.npy --backbone-state data/clip-state.pt --data data/prepared/train.npz --method dmnsp --epochs 5 --output runs/dmnsp
+```
+
+`pgp` learns key/value prefixes and projects gradients against stored query-feature directions, following [official PGP](https://github.com/JingyangQiao/prompt-gradient-projection/tree/main/dualprompt-pgp). The declared adaptation uses one shared prefix per layer without DualPrompt's retrieval pool. `vpt_ns` inserts deep prompt tokens, collects both `Q W_k` and original-to-prompt attention covariances, and projects the **optimizer update** on both sides, including the times-threshold/Frobenius convention from [official VPT-NS](https://github.com/zugexiaodui/VPTinNSforCL/blob/main/train_eval.py). `dmnsp` adds residual bottleneck adapters to both actual CLIP modalities, with token-derived class prototypes. Only visual gradients receive multi-layer null projections and `exp(-top-10%-similarity)*30` coefficients from [official DMNSP](https://github.com/RL-VIG/DMNSP/blob/master/continual_clip/models.py); text adapters train normally. For small dimensions, top-k is at least one. These are explicit backbone/mechanism adaptations, not upstream pretrained recipe reproductions. Trainable method parameters and projection state are separate outputs; this different backbone is not conflated with the MLP equal-byte frontier.
+
+## Additional functional verification
+
+```bash
+python -m nullaudit.verify_comparisons --output runs/comparisons-check
+python -m nullaudit.verify_prompts --output runs/prompts-check
+```
+
+The comparison check reads generated **official CIFAR Python-release pickle structure**, preserves the test role, reserves validation from training and verifies task IDs. The adapter output remains `N,3,32,32`; only this cheap state check pools those images to three channels. Local releases do not need download. Class order is seeded/random by default (`--ordered-classes` selects ascending order). Pickle input must be a trusted official release or explicit local fixture. All seven new controls run through training, active regularization/projection, critical first/last-layer updates, 1e-6 save/load, held-out evaluation, PackNet old-weight invariance and OGD/GPM hand cases. Ten equal-cap configurations include nine computed and one correctly reported infeasible tiny-cap NullAudit run, with every computed retained state inside its cap.
+
+The prompt check uses an actual random two-layer CLIP vision/text configuration, two tasks and separate held-out generated images. Nonempty old-task memory exercises PGP prefix projection, both VPT consistency matrices, and DMNSP visual/text adapters; critical nonzero gradients, updates, held-out task matrices, a hand null projector and 1e-6 reload equality are checked. Random token/weight fixtures establish functionality only. On this host set process-local `USE_TF=0`, `USE_FLAX=0`, `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `MKL_THREADING_LAYER=SEQUENTIAL`. Optional dependencies for this pass are isolated in ignored `.deps/`.
 
 ## Functional verification
 

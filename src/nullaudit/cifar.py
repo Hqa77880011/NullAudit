@@ -17,17 +17,27 @@ def main():
     parser.add_argument("--classes-per-task", type=int, default=10)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--operator-config")
+    parser.add_argument("--download", action="store_true", help="Download official CIFAR archive if needed")
+    parser.add_argument("--ordered-classes", action="store_true", help="Use ascending classes instead of seeded task order")
     args = parser.parse_args()
-    training = CIFAR100(args.root, train=True, download=True)
-    testing = CIFAR100(args.root, train=False, download=True)
-    directory = Path(args.root) / training.base_folder
+    if args.download:
+        CIFAR100(args.root, train=True, download=True)
+        CIFAR100(args.root, train=False, download=True)
+    directory = Path(args.root) / "cifar-100-python"
+    # CIFAR release files use Python pickle; read only trusted official releases
+    # (or explicitly generated functional fixtures), never arbitrary downloads.
     with (directory / "train").open("rb") as stream:
         train_metadata = pickle.load(stream, encoding="latin1")
     with (directory / "test").open("rb") as stream:
         test_metadata = pickle.load(stream, encoding="latin1")
+    training = np.asarray(train_metadata["data"])
+    testing = np.asarray(test_metadata["data"])
+    for data, metadata in ((training, train_metadata), (testing, test_metadata)):
+        if data.ndim != 2 or data.shape[1] != 3072 or len(metadata["fine_labels"]) != len(data):
+            raise ValueError("CIFAR-100 release arrays require N x 3072 pixels and aligned labels")
     fine = np.r_[train_metadata["fine_labels"], test_metadata["fine_labels"]]
     coarse = np.r_[train_metadata["coarse_labels"], test_metadata["coarse_labels"]]
-    x = np.concatenate([training.data, testing.data]).transpose(0, 3, 1, 2).astype(np.float32) / 255
+    x = np.concatenate([training, testing]).reshape(-1, 3, 32, 32).astype(np.float32) / 255
     y = fine if args.labels == "fine" else coarse
     rng = np.random.default_rng(args.seed)
     split = np.full(len(x), 2, dtype=np.int64)
@@ -47,6 +57,8 @@ def main():
             boundaries = np.r_[0, np.cumsum(rng.multinomial(len(indices), proportions))]
             for c in range(args.clients):
                 client[indices[boundaries[c] : boundaries[c + 1]]] = c
+    class_order = np.arange(100) if args.ordered_classes else rng.permutation(100)
+    class_rank = np.argsort(class_order)
     packed = {
         "x": x,
         "y": y.astype(np.int64),
@@ -54,7 +66,7 @@ def main():
         "coarse_label": coarse.astype(np.int64),
         "group": np.arange(len(x)),
         "split": split,
-        "task": (fine // args.classes_per_task).astype(np.int64),
+        "task": (class_rank[fine] // args.classes_per_task).astype(np.int64),
     }
     if args.clients:
         packed["client"] = client

@@ -170,6 +170,7 @@ def evaluate(checkpoint, data, output):
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     cfg = payload["config"]
     cfg["_checkpoint_directory"] = str(Path(checkpoint).parent)
+    cfg["_protection"] = payload.get("protection", {})
     device = torch.device(cfg["device"])
     model = core.Model(cfg, payload["method"]).to(device)
     model.load_state_dict(payload["state"])

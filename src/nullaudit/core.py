@@ -10,7 +10,9 @@ from torch.nn import functional as F
 from .vision import classification_metrics
 
 
-METHODS = ["nullaudit", "fixed_rank", "no_gate", "fine_tune", "ewc"]
+from .comparisons import METHODS as COMPARISONS
+
+METHODS = ["nullaudit", "fixed_rank", "no_gate", "fine_tune", "ewc"] + COMPARISONS
 
 
 class Model(nn.Module):
@@ -67,7 +69,7 @@ class FrequentDirections:
         return vectors[keep].T, singular[keep]
 
 
-def fit(model, train, validation, cfg, output):
+def _fit_projection(model, train, validation, cfg, output):
     torch.manual_seed(cfg["seed"])
     rng = np.random.default_rng(cfg["seed"])
     device = next(model.parameters()).device
@@ -207,11 +209,36 @@ def fit(model, train, validation, cfg, output):
     )
 
 
+def fit(model, train, validation, cfg, output):
+    """Train and record sampled process RSS independently of retained-state bytes."""
+    from .comparisons import SampledRSS, fit as fit_comparison
+    with SampledRSS() as memory:
+        if model.method in COMPARISONS:
+            fit_comparison(model, train, validation, cfg, output)
+        else:
+            _fit_projection(model, train, validation, cfg, output)
+    cfg["training_metrics"].update(process_rss_start_bytes=memory.start,
+                                   process_peak_rss_bytes_sampled=memory.peak,
+                                   rss_sampling_interval_seconds=0.002)
+    path = Path(output) / "model.pt"
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    payload["config"] = cfg
+    torch.save(payload, path)
+
+
 def loss(model, batch, cfg):
     return F.cross_entropy(model(batch["x"]), batch["y"].long())
 
 
 def predict(model, batch, cfg, calibration=None):
+    if model.method == "packnet" and "owners" in cfg.get("_protection", {}):
+        from .comparisons import apply_task_mask
+        output = []
+        for index in range(len(batch["x"])):
+            original = apply_task_mask(model, cfg["_protection"]["owners"].to(batch["x"].device), int(batch["task"][index]))
+            output.append(model(batch["x"][index:index + 1]))
+            assign(model, original)
+        return {"logits": torch.cat(output)}
     return {"logits": model(batch["x"])}
 
 
@@ -235,9 +262,11 @@ def metrics(prediction, data, cfg):
     evaluator = Model(cfg, cfg["training_method"])
     matrix = []
     for path in sorted(Path(cfg["_checkpoint_directory"]).glob("task_*.pt")):
-        evaluator.load_state_dict(torch.load(path, map_location="cpu", weights_only=True)["state"])
+        saved = torch.load(path, map_location="cpu", weights_only=True)
+        evaluator.load_state_dict(saved["state"])
         with torch.no_grad():
-            labels = evaluator(torch.tensor(data["x"])).argmax(-1).numpy()
+            evaluation_cfg = {**cfg, "_protection": saved.get("protection", {})}
+            labels = predict(evaluator, {"x": torch.tensor(data["x"]), "task": torch.tensor(data["task"])}, evaluation_cfg)["logits"].argmax(-1).numpy()
         matrix.append(
             [
                 float(np.mean(labels[data["task"] == task] == data["y"][data["task"] == task]))
@@ -250,4 +279,4 @@ def metrics(prediction, data, cfg):
 
 
 def inference(model, batch, cfg):
-    return model(batch["x"])
+    return predict(model, batch, cfg)["logits"]

@@ -13,6 +13,9 @@ dependencies = ["torch>=2.2", "psutil>=5.9", "Pillow>=10","torchvision>=0.17","n
 [project.scripts]
 nullaudit = "nullaudit.cli:main"
 
+[project.optional-dependencies]
+prompts = ["transformers>=4.46,<5"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
