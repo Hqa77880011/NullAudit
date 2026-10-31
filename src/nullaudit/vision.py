@@ -13,8 +13,9 @@ def classification_metrics(logits, labels):
     confidence = probability.max(-1)
     correct = prediction == labels
     ece = 0.0
-    for lower in np.linspace(0, 1, 16)[:-1]:
-        mask = (confidence > lower) & (confidence <= lower + 1 / 15)
+    bins = np.minimum((confidence * 15).astype(int), 14)
+    for index in range(15):
+        mask = bins == index
         if mask.any():
             ece += mask.mean() * abs(correct[mask].mean() - confidence[mask].mean())
     return {

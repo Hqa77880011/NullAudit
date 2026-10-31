@@ -71,8 +71,6 @@ def fit(model, train, validation, cfg, output):
     torch.manual_seed(cfg["seed"])
     rng = np.random.default_rng(cfg["seed"])
     device = next(model.parameters()).device
-    x = torch.as_tensor(train.data["x"], device=device)
-    y = torch.as_tensor(train.data["y"], device=device)
     task = np.asarray(train.data["task"], dtype=int)
     tasks = sorted(np.unique(task).tolist())
     parameters = tuple(model.parameters())
@@ -90,10 +88,14 @@ def fit(model, train, validation, cfg, output):
     output.mkdir(parents=True, exist_ok=True)
     for task_id in tasks:
         indices = np.flatnonzero(task == task_id)
+        # The learner puts only the current task on device; the dataset object
+        # is an external offline stream, not a protected replay buffer.
+        x = torch.as_tensor(train.data["x"][indices], device=device)
+        y = torch.as_tensor(train.data["y"][indices], device=device)
         start = time.perf_counter()
         retentions, ranks, residuals = [], [], []
         for epoch in range(cfg["epochs_per_task"]):
-            order = rng.permutation(indices)
+            order = rng.permutation(len(indices))
             for offset in range(0, len(order), cfg["batch_size"]):
                 batch = order[offset : offset + cfg["batch_size"]]
                 loss_value = F.cross_entropy(model(x[batch]), y[batch].long())
@@ -143,7 +145,7 @@ def fit(model, train, validation, cfg, output):
                 retentions.append(retention)
                 ranks.append(k)
                 assign(model, current.detach() - cfg["learning_rate"] * projected)
-        sample = rng.choice(indices, min(len(indices), cfg["jacobian_examples"]), replace=False)
+        sample = rng.choice(len(indices), min(len(indices), cfg["jacobian_examples"]), replace=False)
         if model.method == "ewc":
             accumulated = torch.zeros_like(fisher)
             for index in sample:
@@ -163,7 +165,7 @@ def fit(model, train, validation, cfg, output):
                     )
                     sketch.append(row)
             Q, singular = sketch.decomposition()
-        protected_bytes = int((sketch.buffer.numel() + Q.numel()) * 4)
+        protected_bytes = int((sketch.buffer.numel() + Q.numel() + singular.numel()) * 4 + 8)
         if model.method == "ewc":
             protected_bytes += (fisher.numel() + anchor.numel()) * 4
         history.append(
@@ -189,6 +191,7 @@ def fit(model, train, validation, cfg, output):
             },
             output / f"sketch_task_{task_id:04d}.pt",
         )
+        del x, y
     cfg["training_metrics"] = {
         "protected_bytes": history[-1]["protected_bytes"],
         "gradient_retention": float(np.mean([row["gradient_retention"] for row in history])),
@@ -212,6 +215,19 @@ def predict(model, batch, cfg, calibration=None):
     return {"logits": model(batch["x"])}
 
 
+def continual_metrics(accuracy):
+    """Report final mean accuracy, maximum-past forgetting, and learning accuracy."""
+    accuracy = np.asarray(accuracy)
+    forgetting = [max(accuracy[i:, i]) - accuracy[-1, i]
+                  for i in range(min(accuracy.shape) - 1)]
+    return {
+        "average_task_accuracy": float(accuracy[-1].mean()),
+        "forgetting": float(np.mean(forgetting)) if forgetting else 0.0,
+        "new_task_accuracy": float(np.mean(np.diag(accuracy))),
+        "task_accuracy_matrix": accuracy.tolist(),
+    }
+
+
 def metrics(prediction, data, cfg):
     result = classification_metrics(prediction["logits"], data["y"])
     result.update(cfg.get("training_metrics", {}))
@@ -229,17 +245,7 @@ def metrics(prediction, data, cfg):
             ]
         )
     if matrix:
-        accuracy = np.asarray(matrix)
-        result["average_task_accuracy"] = float(accuracy[-1].mean())
-        forgetting = [
-            max(accuracy[i:, i]) - accuracy[-1, i]
-            for i in range(min(len(tasks), len(accuracy)) - 1)
-        ]
-        result["forgetting"] = float(np.mean(forgetting)) if forgetting else 0.0
-        result["new_task_accuracy"] = float(
-            np.mean([accuracy[i, i] for i in range(min(accuracy.shape))])
-        )
-        result["task_accuracy_matrix"] = accuracy.tolist()
+        result.update(continual_metrics(matrix))
     return result
 
 
