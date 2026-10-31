@@ -1,0 +1,8 @@
+{
+  "vit": {"image_size": 224, "patch_size": 16, "num_layers": 12, "num_heads": 12, "hidden_dim": 768, "mlp_dim": 3072, "num_classes": 1000},
+  "classes": 100, "general_layers": [0, 1], "expert_layers": [2, 3, 4],
+  "general_length": 5, "expert_length": 5, "pool_size": 10, "top_k": 1,
+  "batchwise_prompt": true, "shared_prompt_pool": true, "memory_threshold": 0.5,
+  "epochs": 20, "batch_size": 24, "learning_rate": 0.03, "label_smoothing": 0.1,
+  "pull_coefficient": 1.0, "clip_gradient": 1.0, "seed": 59
+}
