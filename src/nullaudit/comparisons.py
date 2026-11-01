@@ -249,8 +249,7 @@ def fit(model, train, validation, cfg, output):
             capacity = max(0, (budget - 64) // each)
             if capacity < 1:
                 raise ValueError("Replay budget cannot hold one image and label")
-            # Uniform sampling over retained old+current records is the explicit
-            # bounded-buffer convention; it is not claimed to be exact reservoir sampling.
+            # Uniformly sample retained and current records without replacement.
             selected = rng.choice(len(old_y), min(capacity, len(old_y)), replace=False)
             reservoir_x, reservoir_y = old_x[selected].clone(), old_y[selected].clone()
             state = {"x": reservoir_x, "y": reservoir_y}
